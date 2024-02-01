@@ -1,0 +1,5 @@
+package scratchpad
+
+object Main {
+    
+}
