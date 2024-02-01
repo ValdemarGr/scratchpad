@@ -15,7 +15,10 @@ lazy val root = project.in(file("."))
     "io.circe" %% "circe-literal" % "0.14.6",
     "org.tpolecat" %% "sourcepos" % "1.1.0",
     "org.typelevel" %% "paiges-core" % "0.4.2",
-    "org.scalameta" %% "munit" % "1.0.0-M10" % Test,
-    "org.typelevel" %% "munit-cats-effect" % "2.0.0-M3" % Test
-    )
+      "org.typelevel" %% "vault" % "3.5.0",
+    "org.scalameta" %% "munit" % "1.0.0-M10" ,
+    "org.typelevel" %% "munit-cats-effect" % "2.0.0-M3",
+    "com.disneystreaming" %% "weaver-cats" % "0.8.4"
+    ),
+    testFrameworks += new TestFramework("weaver.framework.CatsEffect")
   )
