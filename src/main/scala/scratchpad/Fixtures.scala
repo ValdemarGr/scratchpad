@@ -39,7 +39,10 @@ object Fixtures {
     }
   }
 
-  def migrationContainer(migrationsPath: fs2.io.file.Path,db: Postgres): ContainerBuilder = 
+  def migrationContainer(
+      migrationsPath: fs2.io.file.Path,
+      db: Postgres
+  ): ContainerBuilder =
     ContainerBuilder("migrate/migrate")
       .modify(
         _.addFileSystemBind(
@@ -56,12 +59,25 @@ object Fixtures {
           "up"
         )
       )
-      .modify(_.setStartupCheckStrategy(new OneShotStartupCheckStrategy().withTimeout(10.seconds.toJava)))
+      .modify(
+        _.setStartupCheckStrategy(
+          new OneShotStartupCheckStrategy().withTimeout(10.seconds.toJava)
+        )
+      )
 
-  def migrate(migrationsPath: fs2.io.file.Path,db: Fixture[Postgres]): Suite[Unit] =
-    fixture(db.map(db => Stream.resource(migrationContainer(migrationsPath, db).start[IO]))).void
+  def migrate(
+      migrationsPath: fs2.io.file.Path,
+      db: Fixture[Postgres]
+  ): Suite[Unit] =
+    fixture(
+      db.map(db =>
+        Stream.resource(migrationContainer(migrationsPath, db).start[IO])
+      )
+    ).void
 
-  def migratedPostgres(migrationsPath: fs2.io.file.Path): Suite[Fixture[Postgres]] =
+  def migratedPostgres(
+      migrationsPath: fs2.io.file.Path
+  ): Suite[Fixture[Postgres]] =
     postgres.flatTap(migrate(migrationsPath, _))
 
   final case class Redpanda(rpk: GenericContainer[?]) {
@@ -69,7 +85,6 @@ object Fixtures {
     def port = rpk.getMappedPort(9092).toInt
   }
   def redpanda: Suite[Fixture[Redpanda]] = {
-    import GenericContainer._
     val cmd =
       s"""|rpk config bootstrap --id 0 && \\
           |rpk config set redpanda.seed_servers "[]" --format json && \\
@@ -84,14 +99,32 @@ object Fixtures {
     fixture {
       Stream.resource {
         ContainerBuilder("docker.vectorized.io/vectorized/redpanda:v21.11.12")
-          .modify(_.withCreateContainerCmdModifier(_.withEntrypoint("bash", "-c", cmd)))
+          .modify(
+            _.withCreateContainerCmdModifier(
+              _.withEntrypoint("bash", "-c", cmd)
+            )
+          )
           .modify(_.addExposedPort(9092))
           .start[IO]
       }
     }.map(_.map(Redpanda(_)))
   }
 
-  def sftp(key: fs2.io.file.Path) = {
+  def sftp(key: fs2.io.file.Path): Suite[Fixture[GenericContainer[?]]] =
+    fixture {
+      Stream.resource {
+        ContainerBuilder("atmoz/sftp")
+          .modify(_.addExposedPort(22))
+          .modify(_.setCommand("useruser:passpass:::folder,collection"))
+          .modify(
+            _.addFileSystemBind(
+              key.absolute.toString,
+              "/home/useruser/.ssh/id_rsa.pub",
+              BindMode.READ_ONLY
+            )
+          )
+          .start[IO]
+      }
+    }
 
-  }
 }
