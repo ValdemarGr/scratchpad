@@ -6,43 +6,48 @@ import org.testcontainers.utility.DockerImageName
 import toplevel._
 import cats.implicits._
 import org.testcontainers.containers.BindMode
-import org.testcontainers.containers.{GenericContainer, Container}
+import org.testcontainers.containers.{Container, GenericContainer}
 import org.testcontainers.containers.startupcheck.OneShotStartupCheckStrategy
 import scala.concurrent.duration._
 import scala.jdk.DurationConverters._
+import org.testcontainers.containers.Network
 
 object Fixtures {
   import SuiteOps._
+
+  def network: Suite[Fixture[Network]] = fixture {
+    Stream.bracket(IO.blocking(Network.newNetwork()))(n => IO.blocking(n.close()))
+  }
 
   final case class Postgres(psql: GenericContainer[?]) {
     def host = psql.getHost()
     def port = psql.getMappedPort(5432).toInt
   }
-  def postgres: Suite[Fixture[Postgres]] = {
+  def postgres(network: Fixture[Network]): Suite[Fixture[Postgres]] = {
     import org.testcontainers.containers.wait.strategy.Wait
     fixture {
-      Stream.resource {
-        ContainerBuilder("postgres:14")
-          .modify(_.addEnv("POSTGRES_USER", "postgres"))
-          .modify(_.addEnv("POSTGRES_PASSWORD", "1234"))
-          .modify(_.addEnv("POSTGRES_DB", "postgres"))
-          .modify(_.addEnv("POSTGRES_HOST_AUTH_METHOD", "trust"))
-          .modify(_.addExposedPort(5432))
-          .modify(
-            _.setWaitStrategy(
-              Wait.forSuccessfulCommand("pg_isready -U postgres")
+      network.map { n =>
+        Stream.resource {
+          ContainerBuilder("postgres:14")
+            .modify(_.addEnv("POSTGRES_USER", "postgres"))
+            .modify(_.addEnv("POSTGRES_PASSWORD", "1234"))
+            .modify(_.addEnv("POSTGRES_DB", "postgres"))
+            .modify(_.addEnv("POSTGRES_HOST_AUTH_METHOD", "trust"))
+            .modify(_.addExposedPort(5432))
+            .modify(_.withNetwork(n))
+            .modify(
+              _.setWaitStrategy(
+                Wait.forSuccessfulCommand("pg_isready -U postgres")
+              )
             )
-          )
-          .start[IO]
-          .map(Postgres(_))
+            .start[IO]
+            .map(Postgres(_))
+        }
       }
     }
   }
 
-  def migrationContainer(
-      migrationsPath: fs2.io.file.Path,
-      db: Postgres
-  ): ContainerBuilder =
+  def migrationContainer(migrationsPath: fs2.io.file.Path, db: Postgres, network: Network): ContainerBuilder =
     ContainerBuilder("migrate/migrate")
       .modify(
         _.addFileSystemBind(
@@ -64,21 +69,26 @@ object Fixtures {
           new OneShotStartupCheckStrategy().withTimeout(10.seconds.toJava)
         )
       )
+      .modify(_.withNetwork(network))
 
-  def migrate(
-      migrationsPath: fs2.io.file.Path,
-      db: Fixture[Postgres]
-  ): Suite[Unit] =
-    fixture(
-      db.map(db =>
-        Stream.resource(migrationContainer(migrationsPath, db).start[IO])
-      )
-    ).void
+  def migrate(migrationsPath: fs2.io.file.Path, db: Fixture[Postgres], network: Fixture[Network]): Suite[Unit] =
+    fixture {
+      for {
+        db <- db
+        network <- network
+      } yield Stream.resource {
+        migrationContainer(migrationsPath, db, network).start[IO]
+      }
+    }.void
 
   def migratedPostgres(
-      migrationsPath: fs2.io.file.Path
+    migrationsPath: fs2.io.file.Path
   ): Suite[Fixture[Postgres]] =
-    postgres.flatTap(migrate(migrationsPath, _))
+    for {
+      nw <- network
+      db <- postgres(nw)
+      _ <- migrate(migrationsPath, db, nw)
+    } yield db
 
   final case class Redpanda(rpk: GenericContainer[?]) {
     def host = rpk.getHost()
@@ -110,7 +120,11 @@ object Fixtures {
     }.map(_.map(Redpanda(_)))
   }
 
-  def sftp(key: fs2.io.file.Path): Suite[Fixture[GenericContainer[?]]] =
+  final case class Sftp(sftp: GenericContainer[?]) {
+    def host = sftp.getHost()
+    def port = sftp.getMappedPort(22).toInt
+  }
+  def sftp(key: fs2.io.file.Path): Suite[Fixture[Sftp]] =
     fixture {
       Stream.resource {
         ContainerBuilder("atmoz/sftp")
@@ -124,7 +138,43 @@ object Fixtures {
             )
           )
           .start[IO]
+          .map(Sftp(_))
       }
     }
 
+  final case class Spice(spicedb: GenericContainer[?]) {
+    def host = spicedb.getHost()
+    def port = spicedb.getMappedPort(50051).toInt
+  }
+  def makeSpice(pg: Fixture[Postgres], network: Fixture[Network]): Suite[Fixture[Spice]] =
+    fixture {
+      (network, pg).mapN { (n, db) =>
+        Stream.resource {
+          ContainerBuilder("authzed/sapicedb:v1.25.0")
+            .modify(_.addEnv("SPICEDB_GRPC_PRESHARED_KEY", "key"))
+            .modify(_.addExposedPort(50051))
+            .modify(_.withNetwork(n))
+            .modify(
+              _.withCommand(
+                "serve",
+                "--datastore-engine=postgres",
+                s"--datastore-conn-uri=postgres://postgres:1234@${db.host}:${db.port}/postgres?sslmode=disable",
+                "--datastore-conn-pool-read-max-open=4",
+                "--datastore-conn-pool-read-min-open=1",
+                "--datastore-conn-pool-write-max-open=4",
+                "--datastore-conn-pool-write-min-open=1"
+              )
+            )
+            .start[IO]
+            .map(Spice(_))
+        }
+      }
+    }
+
+  def spice: Suite[Fixture[Spice]] = 
+    for {
+      nw <- network
+      db <- postgres(nw)
+      sp <- makeSpice(db, nw)
+    } yield sp
 }
