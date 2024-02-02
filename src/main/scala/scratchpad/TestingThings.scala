@@ -20,6 +20,7 @@ object TestContext {
 }
 
 trait Fixture[A] {
+  type A0 = A
   def get(implicit context: TestContext): A
 }
 object Fixture {
@@ -73,9 +74,7 @@ import toplevel._
 
 final case class Test(name: TestName, run: TestContext.FixtureCtx => IO[TestOutcome])
 
-trait BaseSuite {
-  def underlyingSuite: Suite[Test]
-
+trait SuiteOps {
   class PartiallyAppliedTest(name: TestName) {
     def apply(run: TestContext.TestCtx => IO[Expectations]): Test =
       Test(name, x => WTest[IO](name.name, (lg: Log[IO]) => run(TestContext.TestCtx(lg)))(CatsUnsafeRun))
@@ -85,9 +84,19 @@ trait BaseSuite {
   }
 
   def test(name: TestName): PartiallyAppliedTest = new PartiallyAppliedTest(name)
+  
+  def suite(tests: Test*): Suite[Test] = FreeT.liftT(Stream.emits(tests))
+  
+  def fixture[A](stream: Fixture[Stream[IO, A]]): Suite[Fixture[A]] =
+    FreeT.liftF[SuiteAlgebra, IOStream, Fixture[A]](Allocate(stream))
 
-  def suite(tests: Test*): Suite[Test] =
-    FreeT.liftT(Stream.emits(tests))
+  def fixture[A](stream: Stream[IO, A]): Suite[Fixture[A]] =
+    fixture(stream.pure[Fixture])
+}
+object SuiteOps extends SuiteOps
+
+trait BaseSuite extends SuiteOps {
+  def underlyingSuite: Suite[Test]
 
   def analyze: Stream[IO, Test] =
     underlyingSuite.foldMap(Suite.analysisCompiler)
@@ -96,12 +105,6 @@ trait BaseSuite {
     implicit val ev: TestContext.FixtureCtx = TestContext.FixtureCtx()
     underlyingSuite.foldMap(Suite.runCompiler).evalMap(_.run(ev))
   }
-
-  def fixture[A](stream: Fixture[Stream[IO, A]]): Suite[Fixture[A]] =
-    FreeT.liftF[SuiteAlgebra, IOStream, Fixture[A]](Allocate(stream))
-
-  def fixture[A](stream: Stream[IO, A]): Suite[Fixture[A]] =
-    fixture(stream.pure[Fixture])
 }
 
 trait WeaverRTSuite extends RunnableSuite[IO] with BaseSuite with Expectations.Helpers with BaseCatsSuite {
